@@ -190,6 +190,16 @@ if(BUILD_BENCHMARK)
 endif()
 
 # ---------------------------------------------------------------------------
+# JNI Binding
+# ---------------------------------------------------------------------------
+# If ANDROID is set, we generally want the JNI library
+if(ANDROID OR BUILD_JNI)
+    add_library(moonshine_runner_jni SHARED bindings/java/moonshine_runner_jni.cpp)
+    target_link_libraries(moonshine_runner_jni PRIVATE moonshine_runner log)
+    # The Android NDK includes <jni.h> automatically
+endif()
+
+# ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
 if(BUILD_TESTS)
@@ -205,4 +215,12 @@ install(TARGETS moonshine_runner
     ARCHIVE DESTINATION lib
     LIBRARY DESTINATION lib
 )
+if(TARGET moonshine_runner_jni)
+    install(TARGETS moonshine_runner_jni
+        LIBRARY DESTINATION lib
+    )
+    # Install the ORT shared library so it's packaged in the APK
+    install(FILES "${ORT_LIB}" DESTINATION lib)
+endif()
+
 install(DIRECTORY include/moonshine_runner DESTINATION include)

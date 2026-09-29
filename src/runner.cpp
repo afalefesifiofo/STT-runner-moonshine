@@ -191,8 +191,8 @@ private:
             const_cast<float*>(pcm), n_samples,
             audio_shape.data(), audio_shape.size());
 
-        const char* input_names[]  = {"audio_signal"};
-        const char* output_names[] = {"encoder_hidden_states"};
+        const char* input_names[]  = {"input_values"};
+        const char* output_names[] = {"last_hidden_state"};
 
         auto outputs = encoder_session_->Run(
             Ort::RunOptions{nullptr},
@@ -228,25 +228,19 @@ private:
         std::vector<int64_t> generated_ids;
         generated_ids.reserve(max_tokens);
 
-        // Encoder hidden states tensor (reused each step)
         Ort::Value enc_tensor = Ort::Value::CreateTensor<float>(
             mem_info,
             const_cast<float*>(enc.data.data()), enc.data.size(),
             enc.shape.data(), enc.shape.size());
 
-        // KV cache: starts empty, grows each step
-        // Each layer has 2 tensors (key + value) for decoder self-attention.
-        // Shape: [1, n_heads, past_len, head_dim] — starts as [1, n_heads, 0, head_dim]
-        // We'll discover n_heads and head_dim from the first decoder output.
-
-        std::vector<std::vector<float>> kv_data(n_kv_layers_ * 2);
-        std::vector<std::vector<int64_t>> kv_shapes(n_kv_layers_ * 2);
-        int64_t past_len = 0;
+        // 4 tensors per layer: decoder key, decoder value, encoder key, encoder value
+        int num_kv_tensors = n_kv_layers_ * 4;
+        std::vector<std::vector<float>> kv_data(num_kv_tensors);
+        std::vector<std::vector<int64_t>> kv_shapes(num_kv_tensors);
         bool first_step = true;
 
         int64_t cur_token = BOS_TOKEN;
 
-        // Collect input/output name strings from the session
         size_t n_inputs  = decoder_session_->GetInputCount();
         size_t n_outputs = decoder_session_->GetOutputCount();
 
@@ -265,9 +259,10 @@ private:
         }
 
         for (int step = 0; step < max_tokens; ++step) {
-            // Build input tensors for this step
             std::vector<Ort::Value> input_tensors;
             input_tensors.reserve(n_inputs);
+
+            bool use_cache_bool = !first_step;
 
             for (size_t i = 0; i < n_inputs; ++i) {
                 const std::string& name = in_name_strs[i];
@@ -278,48 +273,43 @@ private:
                         mem_info, &cur_token, 1, ids_shape.data(), 2));
 
                 } else if (name == "encoder_hidden_states") {
-                    // We need to re-create from enc since tensors aren't copyable
                     input_tensors.push_back(Ort::Value::CreateTensor<float>(
                         mem_info,
                         const_cast<float*>(enc.data.data()), enc.data.size(),
                         enc.shape.data(), enc.shape.size()));
 
                 } else if (name == "use_cache_branch") {
-                    static int8_t use_cache_val;
-                    use_cache_val = first_step ? 0 : 1;
                     std::vector<int64_t> s = {1};
-                    input_tensors.push_back(Ort::Value::CreateTensor<int8_t>(
-                        mem_info, &use_cache_val, 1, s.data(), 1));
+                    input_tensors.push_back(Ort::Value::CreateTensor<bool>(
+                        mem_info, &use_cache_bool, 1, s.data(), 1));
 
-                } else {
-                    // KV cache input — find which layer
-                    // Name format: past_key_values.N.decoder.key / .value
+                } else if (name.find("past_key_values.") == 0) {
+                    // Parse layer and type
+                    // Format: past_key_values.L.decoder.key
                     int layer = -1;
+                    bool is_decoder = (name.find(".decoder.") != std::string::npos);
                     bool is_key = (name.find(".key") != std::string::npos);
 
-                    for (int l = 0; l < static_cast<int>(n_kv_layers_); ++l) {
-                        std::string key_name  = "past_key_values." + std::to_string(l) + ".decoder.key";
-                        std::string val_name  = "past_key_values." + std::to_string(l) + ".decoder.value";
-                        if (name == key_name || name == val_name) { layer = l; break; }
+                    size_t first_dot = name.find('.');
+                    size_t second_dot = name.find('.', first_dot + 1);
+                    if (first_dot != std::string::npos && second_dot != std::string::npos) {
+                        layer = std::stoi(name.substr(first_dot + 1, second_dot - first_dot - 1));
                     }
 
-                    if (layer < 0) {
-                        // Unknown input — push empty tensor
-                        std::vector<int64_t> empty_shape = {1, 1, 0, 64};
-                        std::vector<float>   empty_data;
+                    if (layer < 0 || layer >= static_cast<int>(n_kv_layers_)) {
+                        std::vector<int64_t> empty_shape = {1, 8, 0, 36};
                         input_tensors.push_back(Ort::Value::CreateTensor<float>(
-                            mem_info, empty_data.data(), 0,
-                            empty_shape.data(), empty_shape.size()));
+                            mem_info, nullptr, 0, empty_shape.data(), empty_shape.size()));
                         continue;
                     }
 
-                    int kv_idx = layer * 2 + (is_key ? 0 : 1);
+                    int kv_idx = layer * 4 + (is_decoder ? 0 : 2) + (is_key ? 0 : 1);
                     auto& data  = kv_data[kv_idx];
                     auto& shape = kv_shapes[kv_idx];
 
                     if (shape.empty()) {
-                        // First step: empty past
-                        shape = {1, 4, 0, 64}; // will be updated after first output
+                        // Empty tensor on first step
+                        shape = {1, 8, 0, 36};
                         input_tensors.push_back(Ort::Value::CreateTensor<float>(
                             mem_info, nullptr, 0, shape.data(), shape.size()));
                     } else {
@@ -327,10 +317,11 @@ private:
                             mem_info, data.data(), data.size(),
                             shape.data(), shape.size()));
                     }
+                } else {
+                    throw std::runtime_error("Unexpected input name: " + name);
                 }
             }
 
-            // Run decoder
             auto outputs = decoder_session_->Run(
                 Ort::RunOptions{nullptr},
                 in_names.data(), input_tensors.data(), n_inputs,
@@ -341,15 +332,17 @@ private:
                 first_step = false;
             }
 
-            // 0: logits [1, 1, vocab_size]
+            // logits: [1, seq, vocab] — we want the last token
             auto& logits_tensor = outputs[0];
             auto logits_info = logits_tensor.GetTensorTypeAndShapeInfo();
-            int64_t vocab_size = logits_info.GetShape()[2];
+            auto logits_shape = logits_info.GetShape();
+            int64_t seq_len = logits_shape[1];
+            int64_t vocab_size = logits_shape[2];
             const float* logits_data = logits_tensor.GetTensorData<float>();
 
-            // Greedy: argmax over vocab
+            const float* last_logits = logits_data + (seq_len - 1) * vocab_size;
             int64_t best_token = static_cast<int64_t>(
-                std::max_element(logits_data, logits_data + vocab_size) - logits_data);
+                std::max_element(last_logits, last_logits + vocab_size) - last_logits);
 
             generated_ids.push_back(best_token);
             cur_token = best_token;
@@ -357,26 +350,30 @@ private:
             if (best_token == EOS_TOKEN) break;
 
             // Update KV cache from present.* outputs
-            ++past_len;
             for (size_t oi = 1; oi < n_outputs; ++oi) {
                 const std::string& oname = out_name_strs[oi];
-                bool is_key = (oname.find(".key") != std::string::npos);
+                if (oname.find("present.") != 0) continue;
+                
                 int layer = -1;
-                for (int l = 0; l < static_cast<int>(n_kv_layers_); ++l) {
-                    std::string k = "present." + std::to_string(l) + ".decoder.key";
-                    std::string v = "present." + std::to_string(l) + ".decoder.value";
-                    if (oname == k || oname == v) { layer = l; break; }
-                }
-                if (layer < 0) continue;
+                bool is_decoder = (oname.find(".decoder.") != std::string::npos);
+                bool is_key = (oname.find(".key") != std::string::npos);
 
-                int kv_idx = layer * 2 + (is_key ? 0 : 1);
-                auto ti = outputs[oi].GetTensorTypeAndShapeInfo();
-                auto shape = ti.GetShape();
-                size_t n = 1;
-                for (auto d : shape) n *= static_cast<size_t>(d);
-                const float* ptr = outputs[oi].GetTensorData<float>();
-                kv_data[kv_idx].assign(ptr, ptr + n);
-                kv_shapes[kv_idx] = shape;
+                size_t first_dot = oname.find('.');
+                size_t second_dot = oname.find('.', first_dot + 1);
+                if (first_dot != std::string::npos && second_dot != std::string::npos) {
+                    layer = std::stoi(oname.substr(first_dot + 1, second_dot - first_dot - 1));
+                }
+                
+                if (layer >= 0 && layer < static_cast<int>(n_kv_layers_)) {
+                    int kv_idx = layer * 4 + (is_decoder ? 0 : 2) + (is_key ? 0 : 1);
+                    auto ti = outputs[oi].GetTensorTypeAndShapeInfo();
+                    auto shape = ti.GetShape();
+                    size_t n = 1;
+                    for (auto d : shape) n *= static_cast<size_t>(d);
+                    const float* ptr = outputs[oi].GetTensorData<float>();
+                    kv_data[kv_idx].assign(ptr, ptr + n);
+                    kv_shapes[kv_idx] = shape;
+                }
             }
         }
 
