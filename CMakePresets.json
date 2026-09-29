@@ -1,0 +1,75 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": { "major": 3, "minor": 27, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release"
+      }
+    },
+    {
+      "name": "native",
+      "displayName": "Native (host machine)",
+      "description": "Build for the current host architecture",
+      "inherits": "base",
+      "cacheVariables": {
+        "BUILD_EXECUTABLE":        "ON",
+        "BUILD_BENCHMARK":         "ON",
+        "BUILD_TESTS":             "ON",
+        "MOONSHINE_FETCH_MODELS":  "ON",
+        "MOONSHINE_MODEL_SIZE":    "tiny"
+      }
+    },
+    {
+      "name": "native-portaudio",
+      "displayName": "Native + PortAudio (live mic)",
+      "inherits": "native",
+      "cacheVariables": {
+        "MOONSHINE_USE_PORTAUDIO": "ON"
+      }
+    },
+    {
+      "name": "x-linux-aarch64",
+      "displayName": "Cross-compile → Linux aarch64",
+      "inherits": "base",
+      "toolchainFile": "${sourceDir}/cmake/toolchains/aarch64-linux-gnu.cmake",
+      "cacheVariables": {
+        "MOONSHINE_ARM_BACKEND":  "ON",
+        "MOONSHINE_FETCH_MODELS": "OFF",
+        "BUILD_TESTS":            "OFF"
+      }
+    },
+    {
+      "name": "x-android-aarch64",
+      "displayName": "Cross-compile → Android arm64-v8a",
+      "inherits": "base",
+      "cacheVariables": {
+        "CMAKE_SYSTEM_NAME":       "Android",
+        "CMAKE_ANDROID_ARCH_ABI":  "arm64-v8a",
+        "CMAKE_ANDROID_API":       "26",
+        "MOONSHINE_ARM_BACKEND":   "ON",
+        "MOONSHINE_FETCH_MODELS":  "OFF",
+        "BUILD_EXECUTABLE":        "OFF",
+        "BUILD_TESTS":             "OFF"
+      }
+    }
+  ],
+  "buildPresets": [
+    { "name": "native",           "configurePreset": "native" },
+    { "name": "native-portaudio", "configurePreset": "native-portaudio" },
+    { "name": "x-linux-aarch64",  "configurePreset": "x-linux-aarch64" },
+    { "name": "x-android-aarch64","configurePreset": "x-android-aarch64" }
+  ],
+  "testPresets": [
+    {
+      "name": "native",
+      "configurePreset": "native",
+      "output": { "outputOnFailure": true },
+      "execution": { "noTestsAction": "error", "stopOnFailure": true }
+    }
+  ]
+}

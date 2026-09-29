@@ -1,0 +1,15 @@
+# CMake toolchain for cross-compiling to Linux aarch64
+# Set AARCH64_TOOLCHAIN_PREFIX if your gcc is not at the default location.
+
+set(CMAKE_SYSTEM_NAME Linux)
+set(CMAKE_SYSTEM_PROCESSOR aarch64)
+
+set(TOOLCHAIN_PREFIX "aarch64-linux-gnu")
+
+find_program(CMAKE_C_COMPILER   ${TOOLCHAIN_PREFIX}-gcc   REQUIRED)
+find_program(CMAKE_CXX_COMPILER ${TOOLCHAIN_PREFIX}-g++   REQUIRED)
+
+set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
+set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
+set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
+set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)
